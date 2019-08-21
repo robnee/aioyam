@@ -10,7 +10,47 @@ connection problem, '@ERROR' on error and the response string otherwise.
 '''
 
 import re
-import socket
+import asyncio
+
+
+class YNCAProtocol(asyncio.Protocol):
+    def __init__(self, name, value, on_con_lost, loop):
+        self.message = name + "=" + value + "\r\n"
+        self.loop = loop
+        self.data = ""
+        self.on_con_lost = on_con_lost
+
+    def connection_made(self, transport):
+        transport.write(self.message.encode())
+        print('Data sent: {!r}'.format(self.message))
+
+    def data_received(self, data):
+        print('Data received: {!r}'.format(data.decode()))
+        self.data += data.decode()
+
+    def connection_lost(self, exc):
+        print('The server closed the connection')
+        print(self.decode_response())
+        self.on_con_lost.set_result(True)
+
+    def decode_response(self):
+        response = self.data.rstrip('\n\r')
+
+        # decode data and check if response indicates error
+        if response == "@UNDEFINED" or response == '@RESTRICTED':
+            return '@ERROR'
+
+        if '\r\n' in response:
+            results = {}
+
+            exp = re.compile(r"(.*)=(.*)\s*", re.IGNORECASE)
+            for line in response.split("\r\n"):
+                if line:
+                    m = exp.match(line)
+                    results[m.group(1)] = m.group(2)
+            response = results
+
+        return response
 
 
 class Yamaha:
@@ -21,8 +61,8 @@ class Yamaha:
         self.request_id = 0
 
     def request(self, hostname, timeout, name, value):
-        ''' send a request and depending on the timeout value wait for and
-        return a response'''
+        """ send a request and depending on the timeout value wait for and
+        return a response"""
         self.request_id += 1
         msg = name + "=" + value + "\r\n"
 
@@ -64,7 +104,7 @@ class Yamaha:
         return response
 
     def parse_response(self, response):
-        ''' Build a dict of the response values '''
+        """ Build a dict of the response values """
         results = {}
 
         exp = re.compile(r"(.*)=(.*)\s*", re.IGNORECASE)
@@ -76,11 +116,11 @@ class Yamaha:
         return results
 
     def get(self, name, timeout=0.05):
-        ''' send request to get value '''
+        """ send request to get value """
         return self.request(self.hostname, timeout, name, '?')
 
     def put(self, name, value, timeout=0.05):
-        ''' send request.  use timeout of 0 to skip waiting for response '''
+        """ send request.  use timeout of 0 to skip waiting for response """
         response = self.request(self.hostname, timeout, name, value)
 
         # Protocol won't answer if we try to PUT value that is already
@@ -92,7 +132,7 @@ class Yamaha:
             return response
 
 
-if __name__ == '__main__':
+def test():
     import time
 
     hostname = 'Yamaha'
@@ -121,3 +161,28 @@ if __name__ == '__main__':
     # print("pwr", yam.put("@MAIN:PWR", "Standby"))
 
     print('total: {:0.3f}'.format(time.time() - start))
+
+
+async def main():
+    # Get a reference to the event loop as we plan to use
+    # low-level APIs.
+    loop = asyncio.get_running_loop()
+
+    on_con_lost = loop.create_future()
+
+    name, value = "@MAIN:PWR", "On"
+
+    transport, protocol = await loop.create_connection(
+        lambda: YNCAProtocol(name, value, on_con_lost, loop),
+        'CL-6EA47', 50000)
+
+    # Wait until the protocol signals that the connection
+    # is lost and close the transport.
+    try:
+        await on_con_lost
+    finally:
+        transport.close()
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
