@@ -30,8 +30,8 @@ class YNCAProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc):
         print('The server closed the connection')
-        print(self.decode_response())
-        self.on_con_lost.set_result(True)
+        response = self.decode_response()
+        self.on_con_lost.set_result(response)
 
     def decode_response(self):
         response = self.data.rstrip('\n\r')
@@ -60,76 +60,44 @@ class Yamaha:
         self.hostname = hostname
         self.request_id = 0
 
-    def request(self, hostname, timeout, name, value):
+    async def request(self, hostname, name, value):
         """ send a request and depending on the timeout value wait for and
         return a response"""
         self.request_id += 1
         msg = name + "=" + value + "\r\n"
 
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(max(timeout, 0.1))
-            s.connect((hostname, self.port))
-        except (InterruptedError):
-            print("cant connect to", hostname, "on", self.port)
-            return None
+        loop = asyncio.get_running_loop()
 
+        done = loop.create_future()
+
+        transport, protocol = await loop.create_connection(
+            lambda: YNCAProtocol(name, value, done, loop),
+            hostname, 50000)
+
+        # Wait until the protocol signals that the connection
+        # is lost and close the transport.
         try:
-            s.sendall(bytes(msg, 'utf-8'))
-            s.settimeout(timeout)
-            response = ''
-            while True:
-                data = s.recv(1024)
-                if not data:
-                    break
-                response = response + data.decode()
-        except socket.timeout:
-            pass
-        except socket.error:
-            return None
+            await done
         finally:
-            s.close()
-            s = None
+            transport.close()
 
-        response = response.rstrip('\n\r')
+        return done.result()
 
-        if False:
-            print('request {}: {}={}'.format(self.request_id, name, value))
-            print('response {}: {}'.format(self.request_id, repr(response)))
-
-        # decode data and check if response indicates error
-        if response == "@UNDEFINED" or response == '@RESTRICTED':
-            return '@ERROR'
-
-        return response
-
-    def parse_response(self, response):
-        """ Build a dict of the response values """
-        results = {}
-
-        exp = re.compile(r"(.*)=(.*)\s*", re.IGNORECASE)
-        for line in response.split("\r\n"):
-            if line:
-                m = exp.match(line)
-                results[m.group(1)] = m.group(2)
-
-        return results
-
-    def get(self, name, timeout=0.05):
+    async def get(self, name, timeout=0.05):
         """ send request to get value """
-        return self.request(self.hostname, timeout, name, '?')
+        return await self.request(self.hostname, name, '?')
 
-    def put(self, name, value, timeout=0.05):
+    async def put(self, name, value, timeout=0.05):
         """ send request.  use timeout of 0 to skip waiting for response """
-        response = self.request(self.hostname, timeout, name, value)
-
-        # Protocol won't answer if we try to PUT value that is already
-        # set to the same value.  if we indicated a timeout and no
-        # respponse was received then get and return the current value
-        if timeout > 0 and response == '':
+        try:
+            x = await self.request(self.hostname, name, value)
+            print("request:", x)
+            return x
+        except TimeoutError:
+            # Protocol won't answer if we try to PUT value to a name that
+            # is alreadyset to the same value.  if we indicated a timeout and
+            # no respponse was received then get and return the current value
             return self.get(name, timeout * 2.0)
-        else:
-            return response
 
 
 def test():
@@ -163,6 +131,15 @@ def test():
     print('total: {:0.3f}'.format(time.time() - start))
 
 
+async def main2():
+
+    hostname = 'CL-6EA47'
+    yam = Yamaha(hostname)
+
+    x = await yam.put("@MAIN:PWR", "Standby", 0.1)
+    print("main2", x)
+
+
 async def main():
     # Get a reference to the event loop as we plan to use
     # low-level APIs.
@@ -185,4 +162,4 @@ async def main():
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    asyncio.run(main2())
