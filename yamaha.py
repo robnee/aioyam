@@ -143,7 +143,7 @@ async def main2():
 async def main():
     # Get a reference to the event loop as we plan to use
     # low-level APIs.
-    loop = asyncio.get_running_loop()
+    loop = asyncio.get_event_loop()
 
     on_con_lost = loop.create_future()
 
@@ -161,5 +161,15 @@ async def main():
         transport.close()
 
 
+def run(futures, timeout=None):
+    loop = asyncio.get_event_loop()
+    
+    done, pending = loop.run_until_complete(asyncio.wait(futures, timeout=timeout))
+    
+    for task in pending:
+        task.cancel()
+
+   
 if __name__ == '__main__':
-    asyncio.run(main2())
+    # asyncio.run(main2())
+    run(main2())
