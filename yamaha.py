@@ -1,13 +1,13 @@
 #! /usr/bin/python3
 
-'''
-python code to control Yamaha AV receiver via YCNA protocol.  Of note is that
+"""
+python code to control Yamaha AV receiver via YNCA protocol.  Of note is that
 put command will not respond if the value being put is the same as the
 current setting.  put API handles this by using a get request if no response
 is received.  This can be skipped by using a timeout of 0.  parse_response will
 turn a response string into a dict for easy access.  request returns None on
 connection problem, '@ERROR' on error and the response string otherwise.
-'''
+"""
 
 import re
 import asyncio
@@ -54,17 +54,16 @@ class YNCAProtocol(asyncio.Protocol):
 
 
 class Yamaha:
-    ''' Yamaha YNCA controller '''
+    """ Yamaha YNCA controller """
     def __init__(self, hostname=None, port=50000):
         self.port = port
         self.hostname = hostname
         self.request_id = 0
 
-    async def request(self, hostname, name, value):
+    async def request(self, hostname, name, value, timeout=None):
         """ send a request and depending on the timeout value wait for and
         return a response"""
         self.request_id += 1
-        msg = name + "=" + value + "\r\n"
 
         loop = asyncio.get_running_loop()
 
@@ -95,8 +94,8 @@ class Yamaha:
             return x
         except TimeoutError:
             # Protocol won't answer if we try to PUT value to a name that
-            # is alreadyset to the same value.  if we indicated a timeout and
-            # no respponse was received then get and return the current value
+            # is already set to the same value.  if we indicated a timeout and
+            # no response was received then get and return the current value
             return self.get(name, timeout * 2.0)
 
 
@@ -163,13 +162,17 @@ async def main():
 
 def run(futures, timeout=None):
     loop = asyncio.get_event_loop()
-    
+
+    if type(futures) is not list:
+        futures = {futures}
+
+    # done, pending = loop.run_until_complete(asyncio.wait(futures), timeout=timeout)
     done, pending = loop.run_until_complete(asyncio.wait(futures, timeout=timeout))
-    
+
     for task in pending:
         task.cancel()
 
    
 if __name__ == '__main__':
     # asyncio.run(main2())
-    run(main2())
+    run(main2(), 1)
