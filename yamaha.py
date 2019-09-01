@@ -68,31 +68,40 @@ class Yamaha:
         loop = asyncio.get_running_loop()
 
         done = loop.create_future()
-
-        transport, protocol = await loop.create_connection(
-            lambda: YNCAProtocol(name, value, done, loop),
-            hostname, 50000)
+        try:
+            transport, protocol = await loop.create_connection(
+                lambda: YNCAProtocol(name, value, done, loop),
+                hostname, 50000)
+        except Exception as e:
+            print(e)
+            
+            return
 
         # Wait until the protocol signals that the connection
         # is lost and close the transport.
+        
         try:
             await done
         finally:
+            print('close:')
             transport.close()
 
         return done.result()
 
     async def get(self, name, timeout=0.05):
         """ send request to get value """
-        return await self.request(self.hostname, name, '?')
+        return await asyncio.wait_for(self.request(self.hostname, name, '?'),
+                                      timeout=timeout)
 
     async def put(self, name, value, timeout=0.05):
         """ send request.  use timeout of 0 to skip waiting for response """
         try:
-            x = await self.request(self.hostname, name, value)
+            x = await asyncio.wait_for(self.request(self.hostname, name, value),
+                                       timeout=timeout)
             print("request:", x)
             return x
-        except TimeoutError:
+        except TimeoutError as e:
+            print('timeout:', e)
             # Protocol won't answer if we try to PUT value to a name that
             # is already set to the same value.  if we indicated a timeout and
             # no response was received then get and return the current value
@@ -135,7 +144,7 @@ async def main2():
     hostname = 'CL-6EA47'
     yam = Yamaha(hostname)
 
-    x = await yam.put("@MAIN:PWR", "Standby", 0.1)
+    x = await yam.put("@MAIN:VOL", "Up 2 dB", 0.1)
     print("main2", x)
 
 
@@ -160,19 +169,21 @@ async def main():
         transport.close()
 
 
-def run(futures, timeout=None):
+def run(future):
     loop = asyncio.get_event_loop()
 
-    if type(futures) is not list:
-        futures = {futures}
-
-    # done, pending = loop.run_until_complete(asyncio.wait(futures), timeout=timeout)
-    done, pending = loop.run_until_complete(asyncio.wait(futures, timeout=timeout))
+    # done, pending = loop.run_until_complete(asyncio.wait(futures, timeout=timeout))
+    done, pending = loop.run_until_complete(future)
 
     for task in pending:
         task.cancel()
 
+
+def patch():
+    asyncio.get_running_loop = asyncio.get_event_loop
+    asyncio.run = run
    
 if __name__ == '__main__':
+    patch()
     # asyncio.run(main2())
-    run(main2(), 1)
+    run(main2())
