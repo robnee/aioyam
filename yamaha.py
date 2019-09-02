@@ -10,11 +10,12 @@ connection problem, '@ERROR' on error and the response string otherwise.
 """
 
 import re
+import sys
 import asyncio
 
 
 class YNCAProtocol(asyncio.Protocol):
-    def __init__(self, name, value, on_con_lost, loop):
+    def __init__(self, name, value, on_con_lost, loop=None):
         self.message = name + "=" + value + "\r\n"
         self.loop = loop
         self.data = ""
@@ -30,8 +31,10 @@ class YNCAProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc):
         print('The server closed the connection')
-        response = self.decode_response()
-        self.on_con_lost.set_result(response)
+        if not self.on_con_lost.cancelled():
+            response = self.decode_response()
+            print("future done:", self.on_con_lost.done(), "cancelled:", self.on_con_lost.cancelled())
+            self.on_con_lost.set_result(response)
 
     def decode_response(self):
         response = self.data.rstrip('\n\r')
@@ -70,20 +73,25 @@ class Yamaha:
         done = loop.create_future()
         try:
             transport, protocol = await loop.create_connection(
-                lambda: YNCAProtocol(name, value, done, loop),
+                lambda: YNCAProtocol(name, value, done),
                 hostname, 50000)
         except Exception as e:
-            print(e)
+            print("create conn:", e)
             
             return
 
+        print("connect:")
         # Wait until the protocol signals that the connection
         # is lost and close the transport.
         
         try:
+            print("awaiting done")
             await done
+            print("done:", done.result())
+        except Exception as e:
+            print("exception:", e)
         finally:
-            print('close:')
+            print('finally close:')
             transport.close()
 
         return done.result()
@@ -144,7 +152,9 @@ async def main2():
     hostname = 'CL-6EA47'
     yam = Yamaha(hostname)
 
-    x = await yam.put("@MAIN:VOL", "Up 2 dB", 0.1)
+    # x = await yam.put("@MAIN:VOL", "Up 2 dB", 0.1)
+    x = await yam.get("@MAIN:VOL", 0.1)
+
     print("main2", x)
 
 
@@ -180,9 +190,13 @@ def run(future):
 
 
 def patch():
-    asyncio.get_running_loop = asyncio.get_event_loop
-    asyncio.run = run
+    """ monkey patch some Python 3.7 stuff into earlier versions """
+    version = sys.version_info.major * 10 + sys.version_info.minor
+    if version < 37:
+        asyncio.get_running_loop = asyncio.get_event_loop
+        asyncio.run = run
    
+
 if __name__ == '__main__':
     patch()
     # asyncio.run(main2())
