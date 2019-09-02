@@ -88,18 +88,25 @@ class Yamaha:
             print("awaiting done")
             await done
             print("done:", done.result())
-        except Exception as e:
-            print("exception:", e)
+        except asyncio.CancelledError:
+            print("request cancelled")
         finally:
             print('finally close:')
             transport.close()
 
+        print("done result:", done.result())
         return done.result()
 
     async def get(self, name, timeout=0.05):
         """ send request to get value """
-        return await asyncio.wait_for(self.request(self.hostname, name, '?'),
-                                      timeout=timeout)
+        try:
+            x = await asyncio.wait_for(self.request(self.hostname, name, '?'),
+                                       timeout=timeout)
+            print("request:", x)
+            return x
+        except asyncio.TimeoutError as e:
+            print('timeout:', e)
+            return None
 
     async def put(self, name, value, timeout=0.05):
         """ send request.  use timeout of 0 to skip waiting for response """
@@ -108,7 +115,7 @@ class Yamaha:
                                        timeout=timeout)
             print("request:", x)
             return x
-        except TimeoutError as e:
+        except asyncio.TimeoutError as e:
             print('timeout:', e)
             # Protocol won't answer if we try to PUT value to a name that
             # is already set to the same value.  if we indicated a timeout and
@@ -153,7 +160,7 @@ async def main2():
     yam = Yamaha(hostname)
 
     # x = await yam.put("@MAIN:VOL", "Up 2 dB", 0.1)
-    x = await yam.get("@MAIN:VOL", 0.1)
+    x = await yam.get("@MAIN:VOL", 2.0)
 
     print("main2", x)
 
@@ -182,11 +189,8 @@ async def main():
 def run(future):
     loop = asyncio.get_event_loop()
 
-    # done, pending = loop.run_until_complete(asyncio.wait(futures, timeout=timeout))
-    done, pending = loop.run_until_complete(future)
-
-    for task in pending:
-        task.cancel()
+    result = loop.run_until_complete(future)
+    print("result:", result)
 
 
 def patch():
