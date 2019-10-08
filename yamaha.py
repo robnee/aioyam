@@ -14,6 +14,12 @@ import sys
 import asyncio
 
 
+"""
+Protocols are fine but they are actually synchronous.  it might be tricky to incorporate the becessary back-end calls later.
+Protocols, at least this example, use a somewhat awkward callback to signal done.
+"""
+
+
 class YNCAProtocol(asyncio.Protocol):
     def __init__(self, name, value, on_con_lost, loop=None):
         self.message = name + "=" + value + "\r\n"
@@ -32,28 +38,56 @@ class YNCAProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         print('The server closed the connection')
         if not self.on_con_lost.cancelled():
-            response = self.decode_response()
+            response = decode_response(self.data)
             print("future done:", self.on_con_lost.done(), "cancelled:", self.on_con_lost.cancelled())
             self.on_con_lost.set_result(response)
 
-    def decode_response(self):
-        response = self.data.rstrip('\n\r')
 
-        # decode data and check if response indicates error
-        if response == "@UNDEFINED" or response == '@RESTRICTED':
-            return '@ERROR'
+def decode_response(data):
+    response = data.rstrip('\n\r')
 
-        if '\r\n' in response:
-            results = {}
+    # decode data and check if response indicates error
+    if response == "@UNDEFINED" or response == '@RESTRICTED':
+        return '@ERROR'
 
-            exp = re.compile(r"(.*)=(.*)\s*", re.IGNORECASE)
-            for line in response.split("\r\n"):
-                if line:
-                    m = exp.match(line)
-                    results[m.group(1)] = m.group(2)
-            response = results
+    if '\r\n' in response:
+        results = {}
 
-        return response
+        exp = re.compile(r"(.*)=(.*)\s*", re.IGNORECASE)
+        for line in response.split("\r\n"):
+            if line:
+                m = exp.match(line)
+                results[m.group(1)] = m.group(2)
+        response = results
+
+    return response
+
+
+async def ynca_request(address, message, timeout=1):
+    if type(address) == str:
+        reader, writer = await asyncio.open_connection(address, 50000)
+    else:
+        reader, writer = await asyncio.open_connection(*address)
+
+    print(f'Send: {message!r}')
+    writer.write(message.encode())
+
+    response = []
+    while True:
+        try:
+            data = await asyncio.wait_for(reader.readuntil(b'\r\n'), timeout=timeout)
+            print(f'Received: {len(data)}: {data.decode()!r}')
+            response.append(data.decode())
+        except asyncio.IncompleteReadError as e:
+            print('incomplete:', e)
+            break
+        except asyncio.TimeoutError as e:
+            print('timeout:', e)
+            break
+
+    writer.close()
+
+    return decode_response(''.join(response))
 
 
 class Yamaha:
@@ -63,7 +97,7 @@ class Yamaha:
         self.hostname = hostname
         self.request_id = 0
 
-    async def request(self, hostname, name, value, timeout=None):
+    async def prequest(self, hostname, name, value, timeout=None):
         """ send a request and depending on the timeout value wait for and
         return a response"""
         self.request_id += 1
@@ -96,6 +130,20 @@ class Yamaha:
 
         print("done result:", done.result())
         return done.result()
+
+    async def request(self, hostname, name, value, timeout=None):
+        """ send a request and depending on the timeout value wait for and
+        return a response"""
+        self.request_id += 1
+
+        try:
+            message = name + "=" + value + "\r\n"
+            response = await ynca_request((hostname, 50000), message)
+        except Exception as e:
+            print("ynca exception:", type(e), e)
+            return
+  
+        return response
 
     async def get(self, name, timeout=0.05):
         """ send request to get value """
@@ -160,7 +208,8 @@ async def main2():
     yam = Yamaha(hostname)
 
     # x = await yam.put("@MAIN:VOL", "Up 2 dB", 0.1)
-    x = await yam.get("@MAIN:VOL", 2.0)
+    x = await yam.put("@MAIN:PWR", "Standby", 5)
+    # x = await yam.get("@MAIN:VOL", 60)
 
     print("main2", x)
 
