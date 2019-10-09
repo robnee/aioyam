@@ -7,40 +7,27 @@ current setting.  put API handles this by using a get request if no response
 is received.  This can be skipped by using a timeout of 0.  parse_response will
 turn a response string into a dict for easy access.  request returns None on
 connection problem, '@ERROR' on error and the response string otherwise.
+
+samples:
+    print("pwr", yam.put("@MAIN:PWR", "On"))
+    print("pwr", yam.put("@MAIN:PWR", "Standby"))
+    print("get vol", yam.get("@MAIN:VOL"))
+    print("vol bad", yam.put("@MAIN:VOL", 'Up 2 Db'))
+    print("vol good", yam.put("@MAIN:VOL", 'Down 2 dB', timeout))
 """
 
 import re
 import sys
 import asyncio
+import logging
+import warnings
 
 
 """
 Protocols are fine but they are actually synchronous.  it might be tricky to incorporate the becessary back-end calls later.
 Protocols, at least this example, use a somewhat awkward callback to signal done.
+todo: write a dummy server task to mock the endpoint for testing
 """
-
-
-class YNCAProtocol(asyncio.Protocol):
-    def __init__(self, name, value, on_con_lost, loop=None):
-        self.message = name + "=" + value + "\r\n"
-        self.loop = loop
-        self.data = ""
-        self.on_con_lost = on_con_lost
-
-    def connection_made(self, transport):
-        transport.write(self.message.encode())
-        print('Data sent: {!r}'.format(self.message))
-
-    def data_received(self, data):
-        print('Data received: {!r}'.format(data.decode()))
-        self.data += data.decode()
-
-    def connection_lost(self, exc):
-        print('The server closed the connection')
-        if not self.on_con_lost.cancelled():
-            response = decode_response(self.data)
-            print("future done:", self.on_con_lost.done(), "cancelled:", self.on_con_lost.cancelled())
-            self.on_con_lost.set_result(response)
 
 
 def decode_response(data):
@@ -92,44 +79,11 @@ async def ynca_request(address, message, timeout=1):
 
 class Yamaha:
     """ Yamaha YNCA controller """
+
     def __init__(self, hostname=None, port=50000):
         self.port = port
         self.hostname = hostname
         self.request_id = 0
-
-    async def prequest(self, hostname, name, value, timeout=None):
-        """ send a request and depending on the timeout value wait for and
-        return a response"""
-        self.request_id += 1
-
-        loop = asyncio.get_running_loop()
-
-        done = loop.create_future()
-        try:
-            transport, protocol = await loop.create_connection(
-                lambda: YNCAProtocol(name, value, done),
-                hostname, 50000)
-        except Exception as e:
-            print("create conn:", e)
-            
-            return
-
-        print("connect:")
-        # Wait until the protocol signals that the connection
-        # is lost and close the transport.
-        
-        try:
-            print("awaiting done")
-            await done
-            print("done:", done.result())
-        except asyncio.CancelledError:
-            print("request cancelled")
-        finally:
-            print('finally close:')
-            transport.close()
-
-        print("done result:", done.result())
-        return done.result()
 
     async def request(self, hostname, name, value, timeout=None):
         """ send a request and depending on the timeout value wait for and
@@ -147,110 +101,94 @@ class Yamaha:
 
     async def get(self, name, timeout=0.05):
         """ send request to get value """
-        try:
-            x = await asyncio.wait_for(self.request(self.hostname, name, '?'),
-                                       timeout=timeout)
-            print("request:", x)
-            return x
-        except asyncio.TimeoutError as e:
-            print('timeout:', e)
-            return None
+        return await self.request(self.hostname, name, '?', timeout=timeout)
 
     async def put(self, name, value, timeout=0.05):
         """ send request.  use timeout of 0 to skip waiting for response """
-        try:
-            x = await asyncio.wait_for(self.request(self.hostname, name, value),
-                                       timeout=timeout)
-            print("request:", x)
-            return x
-        except asyncio.TimeoutError as e:
-            print('timeout:', e)
+        x = await self.request(self.hostname, name, value, timeout=timeout)
+        if not x and timeout:
             # Protocol won't answer if we try to PUT value to a name that
             # is already set to the same value.  if we indicated a timeout and
             # no response was received then get and return the current value
             return self.get(name, timeout * 2.0)
 
 
-def test():
-    import time
+async def ynca_server():
+    """ Mock YNCA host """
 
-    hostname = 'Yamaha'
-    yam = Yamaha(hostname)
+    async def handle_request(reader, writer):
+        data = await reader.read(100)
+        message = data.decode()
+        addr = writer.get_extra_info('peername')
+    
+        print(f"server received {message!r} from {addr!r}")
 
-    # adjust timeout setting (0.01 - 0.20) to test response speed of receiver
-    timeout = 0
+        response = b'@MAIN:PWR=Standby\r\n@MAIN:AVAIL=Not Ready\r\n'
+        print(f"server send: {response!r}")
+        writer.write(response)
+        await writer.drain()
 
-    print('receiver at', yam.hostname)
+        await asyncio.sleep(5)
 
-    start = time.time()
+        print("close the connection")
+        writer.close()
 
-    print("pwr", yam.put("@MAIN:PWR", "On"))
-    print("pwr", yam.put("@MAIN:PWR", "On"))
+    server = await asyncio.start_server(handle_request, '127.0.0.1', 50000)
 
-    # print("input hdmi1", yam.put("@MAIN:INP", 'AV1'))
-    print("get vol", yam.get("@MAIN:VOL"))
-    print("vol bad", yam.put("@MAIN:VOL", 'Up 2 Db'))
+    addr = server.sockets[0].getsockname()
+    print(f'serving on {addr}')
 
-    for _ in range(10):
-        time.sleep(0.1)
-        print()
-        print("vol good", repr(yam.put("@MAIN:VOL", 'Up 2 dB', timeout)))
-        time.sleep(0.1)
-        print("vol good", repr(yam.put("@MAIN:VOL", 'Down 2 dB', timeout)))
-    # print("pwr", yam.put("@MAIN:PWR", "Standby"))
-
-    print('total: {:0.3f}'.format(time.time() - start))
-
-
-async def main2():
-
-    hostname = 'CL-6EA47'
-    yam = Yamaha(hostname)
-
-    # x = await yam.put("@MAIN:VOL", "Up 2 dB", 0.1)
-    x = await yam.put("@MAIN:PWR", "Standby", 5)
-    # x = await yam.get("@MAIN:VOL", 60)
-
-    print("main2", x)
+    await asyncio.sleep(30)
+    
+    server.close()
+    print('done serving')
 
 
 async def main():
-    # Get a reference to the event loop as we plan to use
-    # low-level APIs.
-    loop = asyncio.get_event_loop()
+    async def test():
+        await asyncio.sleep(0.25)
 
-    on_con_lost = loop.create_future()
-
-    name, value = "@MAIN:PWR", "On"
-
-    transport, protocol = await loop.create_connection(
-        lambda: YNCAProtocol(name, value, on_con_lost, loop),
-        'CL-6EA47', 50000)
-
-    # Wait until the protocol signals that the connection
-    # is lost and close the transport.
-    try:
-        await on_con_lost
-    finally:
-        transport.close()
-
-
-def run(future):
-    loop = asyncio.get_event_loop()
-
-    result = loop.run_until_complete(future)
-    print("result:", result)
+        hostname = 'CL-6EA47'
+        hostname = '127.0.0.1'
+        yam = Yamaha(hostname)
+    
+        # x = await yam.put("@MAIN:VOL", "Up 2 dB", 0.1)
+        x = await yam.put("@MAIN:PWR", "On", 5)
+        # x = await yam.get("@MAIN:VOL", 60)
+        
+        print("response", x)
+    
+    await asyncio.gather(test(), ynca_server())
 
 
 def patch():
     """ monkey patch some Python 3.7 stuff into earlier versions """
+
+    def run(task, debug=False):
+        try:
+            loop = asyncio.get_event_loop()
+        except:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        if debug:
+            loop.set_debug(True)
+            logging.getLogger('asyncio').setLevel(logging.DEBUG)
+            warnings.filterwarnings('always')
+        else:
+            loop.set_debug(False)
+            logging.getLogger('asyncio').setLevel(logging.WARNING)
+            warnings.filterwarnings('default')
+            
+        return loop.run_until_complete(task)
+        
     version = sys.version_info.major * 10 + sys.version_info.minor
     if version < 37:
         asyncio.get_running_loop = asyncio.get_event_loop
+        asyncio.create_task = asyncio.ensure_future
         asyncio.run = run
-   
+
 
 if __name__ == '__main__':
     patch()
-    # asyncio.run(main2())
-    run(main2())
+    asyncio.run(main())
