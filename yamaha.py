@@ -63,7 +63,6 @@ async def ynca_request(address, message, timeout=1):
     while True:
         try:
             data = await asyncio.wait_for(reader.readuntil(b'\r\n'), timeout=timeout)
-            print(f'Received: {len(data)}: {data.decode()!r}')
             response.append(data.decode())
         except asyncio.IncompleteReadError as e:
             print('incomplete:', e)
@@ -96,7 +95,7 @@ class Yamaha:
         except Exception as e:
             print("ynca exception:", type(e), e)
             return
-  
+ 
         return response
 
     async def get(self, name, timeout=0.05):
@@ -112,38 +111,57 @@ class Yamaha:
             # no response was received then get and return the current value
             return self.get(name, timeout * 2.0)
 
+        return x
 
 async def ynca_server():
     """ Mock YNCA host """
 
+    # todo: implement multiple requests per connection
     async def handle_request(reader, writer):
-        data = await reader.read(100)
-        message = data.decode()
-        addr = writer.get_extra_info('peername')
+        try:
+            data = await reader.read(100)
+            message = data.decode()
+            addr = writer.get_extra_info('peername')
+        
+            print(f"handle: received {message!r} from {addr!r}")
     
-        print(f"server received {message!r} from {addr!r}")
+            response = b'@MAIN:PWR=Standby\r\n@MAIN:AVAIL=Not Ready\r\n'
+            print(f"handle: send {response!r}")
+            writer.write(response)
+            await writer.drain()
 
-        response = b'@MAIN:PWR=Standby\r\n@MAIN:AVAIL=Not Ready\r\n'
-        print(f"server send: {response!r}")
-        writer.write(response)
-        await writer.drain()
-
-        await asyncio.sleep(5)
-
-        print("close the connection")
-        writer.close()
-
-    server = await asyncio.start_server(handle_request, '127.0.0.1', 50000)
-
-    addr = server.sockets[0].getsockname()
-    print(f'serving on {addr}')
-
-    await asyncio.sleep(30)
+            await asyncio.sleep(5)
     
-    server.close()
-    print('done serving')
+            print("handle: close request connection")
+            writer.close()
+            
+            print("handle: request done")
+        except Exception as e:
+            print('handle: exception:', type(e))
 
-
+    try:
+        server = await asyncio.start_server(handle_request, '127.0.0.1', 50000)
+        
+        addr = server.sockets[0].getsockname()
+        print(f'server: on {addr}')
+    
+        t = 8
+        print(f'server: sleep {t}')
+        await asyncio.sleep(t)
+        print(f'server: wake {t}')
+        server.close()
+        await server.wait_closed()
+    except OSError as e:
+        print('server: error start', e)
+        return
+    except asyncio.CancelledError as e:
+        print('server: cancel exception:', type(e))
+        server.close()
+        await server.wait_closed()
+        
+    print('server: done')
+    
+    
 async def main():
     async def test():
         await asyncio.sleep(0.25)
@@ -156,9 +174,26 @@ async def main():
         x = await yam.put("@MAIN:PWR", "On", 5)
         # x = await yam.get("@MAIN:VOL", 60)
         
-        print("response", x)
+        print("test: response:", x)
     
-    await asyncio.gather(test(), ynca_server())
+    # todo: can we start ynca_server as a task?  how can we cleanly cancel it?
+    # await asyncio.gather(test(), ynca_server())
+    server_task = asyncio.create_task(ynca_server())
+
+    print('main: run test')
+    await test()
+
+    t = 6
+    print(f'main: sleep {t}')
+    await asyncio.sleep(t)
+    print(f'main: wake {t}')
+    
+    if not server_task.done():
+        print('main: cancel server_task:')
+        server_task.cancel()
+        await asyncio.sleep(3)
+
+    print('main: done')
 
 
 def patch():
