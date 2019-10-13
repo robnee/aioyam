@@ -215,12 +215,19 @@ def patch():
             logging.getLogger('asyncio').setLevel(logging.WARNING)
             warnings.filterwarnings('default')
             
-        return loop.run_until_complete(task)
+        response = loop.run_until_complete(task)
         
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        
+        return response
+
+
     version = sys.version_info.major * 10 + sys.version_info.minor
     if version < 37:
         asyncio.get_running_loop = asyncio.get_event_loop
         asyncio.create_task = asyncio.ensure_future
+        asyncio.current_task = asyncio.Task.current_task
+        asyncio.all_tasks = asyncio.Task.all_tasks
         asyncio.run = run
 
 
