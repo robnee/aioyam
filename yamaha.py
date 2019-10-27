@@ -113,55 +113,60 @@ class Yamaha:
 
         return x
 
-async def ynca_server():
+
+class YNCAServer():
     """ Mock YNCA host """
 
-    # todo: implement multiple requests per connection
+    def __init__(self):
+        self.server = None
+
+    # todo: implement multiple requests
+    @staticmethod
     async def handle_request(reader, writer):
         try:
             data = await reader.read(100)
             message = data.decode()
             addr = writer.get_extra_info('peername')
-        
-            print(f"handle: received {message!r} from {addr!r}")
+
+            logging.info(f"handle: received {message!r} from {addr!r}")
     
             response = b'@MAIN:PWR=Standby\r\n@MAIN:AVAIL=Not Ready\r\n'
-            print(f"handle: send {response!r}")
             writer.write(response)
             await writer.drain()
 
             await asyncio.sleep(5)
-    
+
             print("handle: close request connection")
             writer.close()
-            
+
             print("handle: request done")
         except Exception as e:
             print('handle: exception:', type(e))
+        except OSError as e:
+            print('server: error start', e)
+            return
+        except asyncio.CancelledError as e:
+            print('server: cancel exception:', type(e))
+            server.close()
+            await server.wait_closed()
+ 
+    async def start(self):
+        try:
+            self.server = await asyncio.start_server(self.handle_request, '127.0.0.1', 50000)
 
-    try:
-        server = await asyncio.start_server(handle_request, '127.0.0.1', 50000)
-        
-        addr = server.sockets[0].getsockname()
-        print(f'server: on {addr}')
-    
-        t = 8
-        print(f'server: sleep {t}')
-        await asyncio.sleep(t)
-        print(f'server: wake {t}')
-        server.close()
-        await server.wait_closed()
-    except OSError as e:
-        print('server: error start', e)
-        return
-    except asyncio.CancelledError as e:
-        print('server: cancel exception:', type(e))
-        server.close()
-        await server.wait_closed()
-        
-    print('server: done')
-    
-    
+            addr = self.server.sockets[0].getsockname()
+            print(f'server: on {addr}')
+        except Exception as e:
+            print('handle: exception:', type(e), e)
+        except OSError as e:
+            print('server: error start', e)
+            return
+
+    def close(self):
+        self.server.close()
+        print('server: close')
+
+       
 async def main():
     async def test():
         await asyncio.sleep(0.25)
@@ -178,7 +183,8 @@ async def main():
     
     # todo: can we start ynca_server as a task?  how can we cleanly cancel it?
     # await asyncio.gather(test(), ynca_server())
-    server_task = asyncio.create_task(ynca_server())
+    ynca = YNCAServer()
+    server_task = asyncio.create_task(ynca.start())
 
     print('main: run test')
     await test()
@@ -221,7 +227,6 @@ def patch():
         
         return response
 
-
     version = sys.version_info.major * 10 + sys.version_info.minor
     if version < 37:
         asyncio.get_running_loop = asyncio.get_event_loop
@@ -230,7 +235,7 @@ def patch():
         asyncio.all_tasks = asyncio.Task.all_tasks
         asyncio.run = run
 
-
+print('top')
 if __name__ == '__main__':
     patch()
     asyncio.run(main())
