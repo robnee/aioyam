@@ -24,8 +24,8 @@ import warnings
 
 
 """
-Protocols are fine but they are actually synchronous.  it might be tricky to incorporate the becessary back-end calls later.
-Protocols, at least this example, use a somewhat awkward callback to signal done.
+Protocols are fine but they are actually synchronous.  it might be tricky to incorporate the becessary back-end
+calls later.  Protocols, at least this example, use a somewhat awkward callback to signal done.
 todo: write a dummy server task to mock the endpoint for testing
 """
 
@@ -114,7 +114,7 @@ class Yamaha:
         return x
 
 
-class YNCAServer():
+class YNCAServer:
     """ Mock YNCA host """
 
     def __init__(self):
@@ -128,7 +128,7 @@ class YNCAServer():
             message = data.decode()
             addr = writer.get_extra_info('peername')
 
-            logging.info(f"handle: received {message!r} from {addr!r}")
+            logging.info(f"handle_request: received {message!r} from {addr!r}")
     
             response = b'@MAIN:PWR=Standby\r\n@MAIN:AVAIL=Not Ready\r\n'
             writer.write(response)
@@ -156,11 +156,12 @@ class YNCAServer():
 
             addr = self.server.sockets[0].getsockname()
             print(f'server: on {addr}')
-        except Exception as e:
-            print('handle: exception:', type(e), e)
         except OSError as e:
             print('server: error start', e)
-            return
+        except Exception as e:
+            print('handle: exception:', type(e), e)
+
+        return
 
     def close(self):
         self.server.close()
@@ -171,7 +172,7 @@ async def main():
     async def test():
         await asyncio.sleep(0.25)
 
-        hostname = 'CL-6EA47'
+        # hostname = 'CL-6EA47'
         hostname = '127.0.0.1'
         yam = Yamaha(hostname)
     
@@ -235,7 +236,10 @@ def patch():
         asyncio.all_tasks = asyncio.Task.all_tasks
         asyncio.run = run
 
-print('top')
+
 if __name__ == '__main__':
     patch()
-    asyncio.run(main())
+
+    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+
+    asyncio.run(main(), debug=True)
