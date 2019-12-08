@@ -31,23 +31,24 @@ todo: write a dummy server task to mock the endpoint for testing
 
 
 def decode_response(data):
-    response = data.rstrip('\n\r')
+    """ Convert response to a dict """
+
+    response = data.rstrip('\r\n')
+    logging.info(f"raw response {response!r}")
 
     # decode data and check if response indicates error
-    if response == "@UNDEFINED" or response == '@RESTRICTED':
-        return '@ERROR'
-
-    if '\r\n' in response:
-        results = {}
-
+    results = {}
+    if response in ("@UNDEFINED", '@RESTRICTED', '@ERROR'):
+        results = {'response': '@ERROR'}
+    else:
         exp = re.compile(r"(.*)=(.*)\s*", re.IGNORECASE)
         for line in response.split("\r\n"):
             if line:
                 m = exp.match(line)
                 results[m.group(1)] = m.group(2)
-        response = results
+        results['response'] = '@OK'
 
-    return response
+    return results
 
 
 async def ynca_request(address, message, timeout=1):
@@ -56,7 +57,6 @@ async def ynca_request(address, message, timeout=1):
     else:
         reader, writer = await asyncio.open_connection(*address)
 
-    print(f'Send: {message!r}')
     writer.write(message.encode())
 
     response = []
@@ -67,8 +67,9 @@ async def ynca_request(address, message, timeout=1):
         except asyncio.IncompleteReadError as e:
             print('incomplete:', e)
             break
-        except asyncio.TimeoutError as e:
-            print('timeout:', e)
+        except asyncio.TimeoutError:
+            if not response:
+                logging.info(f"ynca_request timeout({timeout}): {address!r} {message!r}")
             break
 
     writer.close()
@@ -86,12 +87,13 @@ class Yamaha:
 
     async def request(self, hostname, name, value, timeout=None):
         """ send a request and depending on the timeout value wait for and
-        return a response"""
+        return a response """
+
         self.request_id += 1
 
         try:
             message = name + "=" + value + "\r\n"
-            response = await ynca_request((hostname, 50000), message)
+            response = await ynca_request((hostname, 50000), message, timeout)
         except Exception as e:
             print("ynca exception:", type(e), e)
             return
@@ -100,16 +102,18 @@ class Yamaha:
 
     async def get(self, name, timeout=0.05):
         """ send request to get value """
+
         return await self.request(self.hostname, name, '?', timeout=timeout)
 
     async def put(self, name, value, timeout=0.05):
         """ send request.  use timeout of 0 to skip waiting for response """
+
         x = await self.request(self.hostname, name, value, timeout=timeout)
         if not x and timeout:
             # Protocol won't answer if we try to PUT value to a name that
             # is already set to the same value.  if we indicated a timeout and
             # no response was received then get and return the current value
-            return self.get(name, timeout * 2.0)
+            return await self.get(name, timeout * 2.0)
 
         return x
 
@@ -136,20 +140,14 @@ class YNCAServer:
 
             await asyncio.sleep(5)
 
-            print("handle: close request connection")
+            logging.info("handle: close request connection")
             writer.close()
 
-            print("handle: request done")
-        except Exception as e:
-            print('handle: exception:', type(e))
+            logging.info("handle: request done")
         except OSError as e:
-            print('server: error start', e)
+            logging.info('server: error start', e)
             return
-        except asyncio.CancelledError as e:
-            print('server: cancel exception:', type(e))
-            server.close()
-            await server.wait_closed()
- 
+
     async def start(self):
         try:
             self.server = await asyncio.start_server(self.handle_request, '127.0.0.1', 50000)
@@ -158,8 +156,10 @@ class YNCAServer:
             print(f'server: on {addr}')
         except OSError as e:
             print('server: error start', e)
-        except Exception as e:
-            print('handle: exception:', type(e), e)
+        except asyncio.CancelledError as e:
+            print('server: cancel exception:', type(e))
+            self.server.close()
+            await self.server.wait_closed()
 
         return
 
@@ -169,27 +169,27 @@ class YNCAServer:
 
        
 async def main():
-    async def test():
+    async def test(hostname):
         await asyncio.sleep(0.25)
 
-        # hostname = 'CL-6EA47'
-        hostname = '127.0.0.1'
         yam = Yamaha(hostname)
     
-        # x = await yam.put("@MAIN:VOL", "Up 2 dB", 0.1)
-        x = await yam.put("@MAIN:PWR", "On", 5)
-        # x = await yam.get("@MAIN:VOL", 60)
+        # x = await yam.put("@MAIN:VOL", "Up 2 dB")
+        x = await yam.put("@MAIN:PWR", "Standby")
+        # x = await yam.get("@MAIN:VOL")
         
         print("test: response:", x)
     
-    # todo: can we start ynca_server as a task?  how can we cleanly cancel it?
+    # todo: can we start ynca_server as a task?
+    # todo: how can we cleanly cancel it?  Should server_task be owned by the class?
     # await asyncio.gather(test(), ynca_server())
     ynca = YNCAServer()
     server_task = asyncio.create_task(ynca.start())
 
-    print('main: run test')
-    await test()
+    # await test('127.0.0.1')
+    await test('CL-6EA47')
 
+    # Let it run for a few seconds
     t = 6
     print(f'main: sleep {t}')
     await asyncio.sleep(t)
@@ -209,7 +209,7 @@ def patch():
     def run(task, debug=False):
         try:
             loop = asyncio.get_event_loop()
-        except:
+        except Exception:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
@@ -242,4 +242,4 @@ if __name__ == '__main__':
 
     logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
-    asyncio.run(main(), debug=True)
+    asyncio.run(main(), debug=False)
