@@ -57,6 +57,10 @@ async def ynca_request(address, message, timeout=1):
     else:
         reader, writer = await asyncio.open_connection(*address)
 
+    # ensure the message is properly terminated
+    if not message.endswith('\r\n'):
+        message += '\r\n'
+
     writer.write(message.encode())
 
     response = []
@@ -65,7 +69,7 @@ async def ynca_request(address, message, timeout=1):
             data = await asyncio.wait_for(reader.readuntil(b'\r\n'), timeout=timeout)
             response.append(data.decode())
         except asyncio.IncompleteReadError as e:
-            print('incomplete:', e)
+            logging.info(f"ynca_request incomplete read ({e}): {address!r} {message!r}")
             break
         except asyncio.TimeoutError:
             if not response:
@@ -84,6 +88,10 @@ class Yamaha:
         self.port = port
         self.hostname = hostname
         self.request_id = 0
+        self.timeout = 0.05
+        
+    def set_timeout(self, timeout):
+        self.timeout = timeout
 
     async def request(self, hostname, name, value, timeout=None):
         """ send a request and depending on the timeout value wait for and
@@ -93,21 +101,25 @@ class Yamaha:
 
         try:
             message = name + "=" + value + "\r\n"
-            response = await ynca_request((hostname, 50000), message, timeout)
+            response = await ynca_request((hostname, 50000), message, 
+                                          timeout or self.timeout)
         except Exception as e:
             print("ynca exception:", type(e), e)
             return
- 
-        return response
+        else:
+            return response
 
-    async def get(self, name, timeout=0.05):
-        """ send request to get value """
+    async def get(self, name, timeout=None):
+        """ send request to get value of name """
 
-        return await self.request(self.hostname, name, '?', timeout=timeout)
+        return await self.request(self.hostname, name, '?',
+                                  timeout=timeout or self.timeout)
 
-    async def put(self, name, value, timeout=0.05):
-        """ send request.  use timeout of 0 to skip waiting for response """
+    async def put(self, name, value, timeout=None):
+        """ send request to set name to value.  A timeout of 0 skips wait for response """
 
+        timeout = timeout or self.timeout
+        
         x = await self.request(self.hostname, name, value, timeout=timeout)
         if not x and timeout:
             # Protocol won't answer if we try to PUT value to a name that
@@ -151,9 +163,9 @@ class YNCAServer:
     async def start(self):
         try:
             self.server = await asyncio.start_server(self.handle_request, '127.0.0.1', 50000)
-
             addr = self.server.sockets[0].getsockname()
             print(f'server: on {addr}')
+            print('server:', self.server)
         except OSError as e:
             print('server: error start', e)
         except asyncio.CancelledError as e:
@@ -161,16 +173,14 @@ class YNCAServer:
             self.server.close()
             await self.server.wait_closed()
 
-        return
-
     def close(self):
-        self.server.close()
-        print('server: close')
+        if self.server:
+            self.server.close()
 
        
 async def main():
     async def test(hostname):
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(1)
 
         yam = Yamaha(hostname)
     
@@ -184,21 +194,18 @@ async def main():
     # todo: how can we cleanly cancel it?  Should server_task be owned by the class?
     # await asyncio.gather(test(), ynca_server())
     ynca = YNCAServer()
-    server_task = asyncio.create_task(ynca.start())
+    await ynca.start()
 
-    # await test('127.0.0.1')
-    await test('CL-6EA47')
+    await test('127.0.0.1')
+    # await test('CL-6EA47')
 
     # Let it run for a few seconds
-    t = 6
+    t = 4
     print(f'main: sleep {t}')
     await asyncio.sleep(t)
-    print(f'main: wake {t}')
     
-    if not server_task.done():
-        print('main: cancel server_task:')
-        server_task.cancel()
-        await asyncio.sleep(3)
+    print(f'main: stop server')
+    ynca.close()
 
     print('main: done')
 
