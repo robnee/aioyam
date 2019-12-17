@@ -20,65 +20,16 @@ import re
 import sys
 import asyncio
 import logging
-import warnings
+
+import patch
 
 
 """
-Protocols are fine but they are actually synchronous.  it might be tricky to incorporate the becessary back-end
-calls later.  Protocols, at least this example, use a somewhat awkward callback to signal done.
+Protocols are fine but they are actually synchronous.  it might be tricky to incorporate
+the becessary back-end calls later.  Protocols, at least this example, use a somewhat
+awkward callback to signal done.
 todo: write a dummy server task to mock the endpoint for testing
 """
-
-
-def decode_response(data):
-    """ Convert response to a dict """
-
-    response = data.rstrip('\r\n')
-    logging.info(f"raw response {response!r}")
-
-    # decode data and check if response indicates error
-    results = {}
-    if response in ("@UNDEFINED", '@RESTRICTED', '@ERROR'):
-        results = {'response': '@ERROR'}
-    else:
-        exp = re.compile(r"(.*)=(.*)\s*", re.IGNORECASE)
-        for line in response.split("\r\n"):
-            if line:
-                m = exp.match(line)
-                results[m.group(1)] = m.group(2)
-        results['response'] = '@OK'
-
-    return results
-
-
-async def ynca_request(address, message, timeout=1):
-    if type(address) == str:
-        reader, writer = await asyncio.open_connection(address, 50000)
-    else:
-        reader, writer = await asyncio.open_connection(*address)
-
-    # ensure the message is properly terminated
-    if not message.endswith('\r\n'):
-        message += '\r\n'
-
-    writer.write(message.encode())
-
-    response = []
-    while True:
-        try:
-            data = await asyncio.wait_for(reader.readuntil(b'\r\n'), timeout=timeout)
-            response.append(data.decode())
-        except asyncio.IncompleteReadError as e:
-            logging.info(f"ynca_request incomplete read ({e}): {address!r} {message!r}")
-            break
-        except asyncio.TimeoutError:
-            if not response:
-                logging.info(f"ynca_request timeout({timeout}): {address!r} {message!r}")
-            break
-
-    writer.close()
-
-    return decode_response(''.join(response))
 
 
 class Yamaha:
@@ -93,18 +44,72 @@ class Yamaha:
     def set_timeout(self, timeout):
         self.timeout = timeout
 
+    @staticmethod
+    def decode_response(data):
+        """ Convert response to a dict """
+    
+        response = data.rstrip('\r\n')
+    
+        # decode data and check if response indicates error
+        results = {}
+        if response in ("@UNDEFINED", '@RESTRICTED', '@ERROR'):
+            results = {'response': '@ERROR'}
+        else:
+            exp = re.compile(r"(.*)=(.*)\s*", re.IGNORECASE)
+            for line in response.split("\r\n"):
+                if line:
+                    m = exp.match(line)
+                    results[m.group(1)] = m.group(2)
+            results['response'] = '@OK'
+    
+        return results
+
+    async def ynca_request(self, address, message, timeout=1):
+        if type(address) == str:
+            reader, writer = await asyncio.open_connection(address, 50000)
+        else:
+            reader, writer = await asyncio.open_connection(*address)
+
+        self.request_id += 1
+
+        # ensure the message is properly terminated
+        if not message.endswith('\r\n'):
+            message += '\r\n'
+
+        writer.write(message.encode())
+    
+        response = []
+        while True:
+            try:
+                data = await asyncio.wait_for(reader.readuntil(b'\r\n'), timeout=timeout)
+                response.append(data.decode())
+            except asyncio.IncompleteReadError as e:
+                logging.info(f"ynca_request incomplete read {e}) {address!r} {message!r}")
+                break
+            except asyncio.TimeoutError:
+                if not response:
+                    logging.info(f"ynca_request timeout({timeout}): {address!r} {message!r}")
+                break
+    
+        writer.close()
+    
+        logging.debug(f"raw response {response!r}")
+    
+        results = self.decode_response(''.join(response))
+        results['request_id'] = self.request_id
+        
+        return results
+
     async def request(self, hostname, name, value, timeout=None):
         """ send a request and depending on the timeout value wait for and
         return a response """
 
-        self.request_id += 1
-
         try:
             message = name + "=" + value + "\r\n"
-            response = await ynca_request((hostname, 50000), message, 
-                                          timeout or self.timeout)
+            response = await self.ynca_request((hostname, 50000), message,
+                                               timeout or self.timeout)
         except Exception as e:
-            print("ynca exception:", type(e), e)
+            logging.warning(f"ynca exception: {type(e)} {e}")
             return
         else:
             return response
@@ -135,48 +140,56 @@ class YNCAServer:
 
     def __init__(self):
         self.server = None
+        self.log = []
 
-    # todo: implement multiple requests
-    @staticmethod
-    async def handle_request(reader, writer):
-        try:
-            data = await reader.read(100)
-            message = data.decode()
-            addr = writer.get_extra_info('peername')
-
-            logging.info(f"handle_request: received {message!r} from {addr!r}")
+    def start(self):
+        # todo: implement multiple requests in a single connection
+        async def handle_request(reader, writer):
+            try:
+                data = await reader.read(100)
+                message = data.decode()
+                addr = writer.get_extra_info('peername')
     
-            response = b'@MAIN:PWR=Standby\r\n@MAIN:AVAIL=Not Ready\r\n'
-            writer.write(response)
-            await writer.drain()
+                logging.info(f"handle_request: received {message!r} from {addr!r}")
+        
+                response = b'@MAIN:PWR=Standby\r\n@MAIN:AVAIL=Not Ready\r\n'
+                writer.write(response)
+                await writer.drain()
+    
+                self.log.append((message, response))
+    
+                await asyncio.sleep(2)
+    
+                logging.info("handle: close request connection")
+                writer.close()
+    
+            except OSError as e:
+                logging.info('server: error start', e)
+                return
 
-            await asyncio.sleep(5)
-
-            logging.info("handle: close request connection")
-            writer.close()
-
-            logging.info("handle: request done")
-        except OSError as e:
-            logging.info('server: error start', e)
-            return
-
-    async def start(self):
-        try:
-            self.server = await asyncio.start_server(self.handle_request, '127.0.0.1', 50000)
-            addr = self.server.sockets[0].getsockname()
-            print(f'server: on {addr}')
-            print('server:', self.server)
-        except OSError as e:
-            print('server: error start', e)
-        except asyncio.CancelledError as e:
-            print('server: cancel exception:', type(e))
-            self.server.close()
-            await self.server.wait_closed()
+        async def boot():
+            try:
+                self.server = await asyncio.start_server(handle_request, '127.0.0.1', 50000)
+                addr = self.server.sockets[0].getsockname()
+                logging.debug(f'server: YNCAServer listening on {addr}')
+            except OSError as e:
+                logging.warning(f"server: error start {e}")
+            except asyncio.CancelledError as e:
+                logging.warning(f"server: cancel exception: {type(e)}")
+    
+        asyncio.create_task(boot())
 
     def close(self):
         if self.server:
             self.server.close()
-
+            
+    async def wait_close(self):
+        if self.server:
+            self.server.close()
+            logging.debug(f"server: waiting for close")
+            await self.server.wait_closed()
+            logging.debug(f"server: closed")
+    
        
 async def main():
     async def test(hostname):
@@ -194,59 +207,21 @@ async def main():
     # todo: how can we cleanly cancel it?  Should server_task be owned by the class?
     # await asyncio.gather(test(), ynca_server())
     ynca = YNCAServer()
-    await ynca.start()
+    ynca.start()
 
     await test('127.0.0.1')
     # await test('CL-6EA47')
 
-    # Let it run for a few seconds
-    t = 4
+    # Let it run for a few seconds then kill it
+    t = 3
     print(f'main: sleep {t}')
     await asyncio.sleep(t)
-    
     print(f'main: stop server')
-    ynca.close()
-
+    await ynca.wait_close()
     print('main: done')
 
 
-def patch():
-    """ monkey patch some Python 3.7 stuff into earlier versions """
-
-    def run(task, debug=False):
-        try:
-            loop = asyncio.get_event_loop()
-        except Exception:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-        if debug:
-            loop.set_debug(True)
-            logging.getLogger('asyncio').setLevel(logging.DEBUG)
-            warnings.filterwarnings('always')
-        else:
-            loop.set_debug(False)
-            logging.getLogger('asyncio').setLevel(logging.WARNING)
-            warnings.filterwarnings('default')
-            
-        response = loop.run_until_complete(task)
-        
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        
-        return response
-
-    version = sys.version_info.major * 10 + sys.version_info.minor
-    if version < 37:
-        asyncio.get_running_loop = asyncio.get_event_loop
-        asyncio.create_task = asyncio.ensure_future
-        asyncio.current_task = asyncio.Task.current_task
-        asyncio.all_tasks = asyncio.Task.all_tasks
-        asyncio.run = run
-
-
 if __name__ == '__main__':
-    patch()
-
     logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
     asyncio.run(main(), debug=False)
