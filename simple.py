@@ -14,7 +14,7 @@ from collections import namedtuple
 from sshtunnel import SSHTunnelForwarder
 
 import patch
-
+from yamaha import Yamaha
 
 Message = namedtuple("Message", "key, value")
 
@@ -127,8 +127,25 @@ class BasicMessageBus(MessageBus):
         logger.info(f"connection closed")
 
 
+class YamahaAdapter:
+    """ interface Yamaha target tommessage bus """
+    def __init__(self, bus):
+        self.bus = bus
+        self.yam = Yamaha()
+        
+    async def listener(self, key):
+        async for msg in self.bus.listen(key):
+            print(f"listen({key}):", msg)
+            if msg:
+                k, v = msg
+                self.yam.put(k, v)
+                print('adaptor: {k}, {v}')
+
+        print(f"listen {key}: done")
+     
+
 async def main():
-    """ main synchronous entry point """
+    """ main entry point """
 
     ps = BasicMessageBus()
     await ps.connect()
