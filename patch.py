@@ -1,3 +1,5 @@
+""" monkey patch some Python 3.7 stuff into earlier versions """
+
 import sys
 import asyncio
 import warnings
@@ -37,4 +39,5 @@ def patch():
         asyncio.all_tasks = asyncio.Task.all_tasks
         asyncio.run = run
         
+
 patch()
