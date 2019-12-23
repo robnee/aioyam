@@ -1,6 +1,7 @@
 import sys
 import asyncio
 import yamaha
+import patch
 
 
 class YNCAProtocol(asyncio.Protocol):
@@ -120,14 +121,6 @@ def run(future):
     result = loop.run_until_complete(future)
     print("result:", result)
 
-
-def patch():
-    """ monkey patch some Python 3.7 stuff into earlier versions """
-    version = sys.version_info.major * 10 + sys.version_info.minor
-    if version < 37:
-        asyncio.get_running_loop = asyncio.get_event_loop
-        asyncio.run = run
-   
 
 if __name__ == '__main__':
     patch()
