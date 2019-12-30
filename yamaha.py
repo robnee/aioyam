@@ -96,7 +96,7 @@ class Yamaha:
         logging.debug(f"raw response {response!r}")
     
         results = self.decode_response(''.join(response))
-        results['request_id'] = self.request_id
+        results['request_id'] = str(self.request_id)
         
         return results
 
@@ -179,6 +179,8 @@ class YNCAServer:
     
         asyncio.create_task(boot())
 
+        return self
+
     def close(self):
         if self.server:
             self.server.close()
@@ -198,16 +200,12 @@ async def main():
         yam = Yamaha(hostname)
     
         # x = await yam.put("@MAIN:VOL", "Up 2 dB")
-        x = await yam.put("@MAIN:PWR", "Standby")
         # x = await yam.get("@MAIN:VOL")
-        
+        x = await yam.put("@MAIN:PWR", "Standby")
+
         print("test: response:", x)
     
-    # todo: can we start ynca_server as a task?
-    # todo: how can we cleanly cancel it?  Should server_task be owned by the class?
-    # await asyncio.gather(test(), ynca_server())
-    ynca = YNCAServer()
-    ynca.start()
+    ynca = YNCAServer().start()
 
     await test('127.0.0.1')
     # await test('CL-6EA47')

@@ -37,6 +37,30 @@ def task_get_name(self):
     return match.group(1).replace('.<locals>', '')
 
 
+async def wait_gracefully(tasks, timeout=None):
+    """
+    wait for tasks to complete issuing cancels to any still pending until done
+    to ensure exceptions and results are always consumed
+    """
+
+    while True:
+        done, pending = await asyncio.wait(tasks, timeout=15)
+
+        for t in done:
+            if t.exception():
+                print("exception:", patch.task_get_name(t), t.exception())
+            elif t.result():
+                print("result:", patch.task_get_name(t), t.result())
+
+        if not pending:
+            break
+
+        for t in pending:
+            t.cancel()
+
+        tasks = pending
+
+
 def patch():
     """ monkey patch some Python 3.7/3.8 stuff into earlier versions """
 
