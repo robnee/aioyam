@@ -48,9 +48,9 @@ async def wait_gracefully(tasks, timeout=None):
 
         for t in done:
             if t.exception():
-                print("exception:", patch.task_get_name(t), t.exception())
+                print("exception:", task_get_name(t), t.exception())
             elif t.result():
-                print("result:", patch.task_get_name(t), t.result())
+                print("result:", task_get_name(t), t.result())
 
         if not pending:
             break

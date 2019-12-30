@@ -19,7 +19,6 @@ from aiotools import patch, wait_gracefully
 Message = namedtuple("Message", "source, key, value")
 
 logger = logging.getLogger(__name__)
-# logger = logging.getLogger()
 
 
 def ts():
@@ -60,14 +59,14 @@ class DotPattern:
 class MessageBus:
     """ MessageBus interface """
 
-    def __init__(self):
-        self._channels = {}
+    async def send(self, message):
+        pass
 
-    def set_channel(self, key, value):
-        self._channels[key] = value
+    async def listen(self, pattern):
+        pass
 
-    def get_channels(self):
-        return self._channels.items()
+    async def close(self):
+        pass
 
 
 class BasicMessageBus(MessageBus):
@@ -76,7 +75,14 @@ class BasicMessageBus(MessageBus):
     def __init__(self):
         super().__init__()
         self.conn = None
+        self._channels = {}
         self.listeners = set()
+
+    def set_channel(self, key, value):
+        self._channels[key] = value
+
+    def get_channels(self):
+        return self._channels.items()
 
     async def connect(self, address=None):
         self.conn = self
@@ -138,21 +144,88 @@ class BasicMessageBus(MessageBus):
         logger.info(f"connection closed")
 
 
-class MessageBridge:
-    """ bridge the local bus with an external bus such as redis """
+# todo: should this be initialized with a mask to restrict the namespace?
+# todo: using patterns makes many of the status metrics unavailable.  Should there just be a single channel?
+class RedisMessageBus(MessageBus):
+    """ A MessageBus implemented as a Redis pubsub channel """
 
-    def __init__(self, pattern, tunnel_config, bus):
+    def __init__(self, pattern, tunnel_config):
+        super().__init__()
+        self.tunnel = None
+        self.aredis = None
         self.pattern = pattern
         self.tunnel_config = tunnel_config
-        self.bus = bus
 
-    async def _receiver(self, aredis):
+    async def connect(self):
+        self.tunnel = SSHTunnelForwarder(**self.tunnel_config)
+        self.tunnel.start()
+
+        address = self.tunnel.local_bind_address
+        self.aredis = await aioredis.create_redis_pool(address, encoding="utf-8")
+        logger.info(f"Redis connected: {self.aredis.address}")
+
+    def redis_pattern(self):
+        return self.pattern + "*" if self.pattern.endswith('.') else self.pattern
+
+    async def send(self, message):
+        if not self.aredis:
+            raise RuntimeError("Redis not connected")
+
+        if message.key.endswith("."):
+            raise ValueError("trailing '.' in key")
+
+        logger.info(f"Redis send: {message}:{message.value}")
+        await self.aredis.publish(message.key, message.value)
+
+    async def listen(self, pattern):
+        if not self.aredis:
+            raise RuntimeError("Redis not connected")
+
+        try:
+            chan, = await self.aredis.psubscribe(self.redis_pattern())
+            while await chan.wait_message():
+                k, v = await chan.get(encoding="utf-8")
+                yield Message("redis", k.decode(), v)
+        except Exception:
+            raise
+
+    async def status(self):
+        if self.aredis:
+
+            return {
+                "status": "connected",
+            #    "listeners": [str(p) for p, _ in self.listeners],
+                "patterns": list(self.aredis.patterns.keys()),
+                "timestamp": ts(),
+            }
+        else:
+            return {"status": "disconnected"}
+
+    async def close(self):
+        self.aredis.close()
+        await self.aredis.wait_closed()
+        self.aredis = None
+
+        self.tunnel.stop()
+        logger.info(f"Redis connection closed")
+
+
+class RedisMessageBridge:
+    """ bridge a local MessageBus with an external Redis pubsub channel """
+
+    def __init__(self, pattern, tunnel_config, bus):
+        self.bus = bus
+        self.aredis = None
+        self.pattern = pattern
+        self.tunnel_config = tunnel_config
+
+    async def receiver(self):
         redis_pattern = self.pattern
         if redis_pattern.endswith('.'):
             redis_pattern += '*'
 
         try:
-            chan, = await aredis.psubscribe(redis_pattern)
+            chan, = await self.aredis.psubscribe(redis_pattern)
             while await chan.wait_message():
                 k, v = await chan.get(encoding="utf-8")
                 logger.info(f"bridge in {self.pattern}: message {k}: {v}")
@@ -160,16 +233,16 @@ class MessageBridge:
         except asyncio.CancelledError:
             logger.info(f"bridge in {self.pattern}: cancelled")
         finally:
-            await aredis.punsubscribe(redis_pattern)
+            await self.aredis.punsubscribe(redis_pattern)
 
-    async def _sender(self, aredis):
+    async def sender(self):
         """ route local messages to redis """
 
         try:
             async for message in self.bus.listen(self.pattern):
                 if message.source != "redis":
                     logger.info(f"bridge out {self.pattern}: {message}")
-                    await aredis.publish(message.key, message.value)
+                    await self.aredis.publish(message.key, message.value)
         except asyncio.CancelledError:
             logger.info(f"bridge out {self.pattern}: cancelled")
 
@@ -178,21 +251,21 @@ class MessageBridge:
 
         with SSHTunnelForwarder(**self.tunnel_config) as tunnel:
             address = tunnel.local_bind_address
-            aredis = await aioredis.create_redis_pool(address, encoding="utf-8")
-            logger.info(f"bridge connected: {aredis.address}")
+            self.aredis = await aioredis.create_redis_pool(address, encoding="utf-8")
+            logger.info(f"bridge connected: {self.aredis.address}")
 
             try:
                 await asyncio.gather(
-                    self._receiver(aredis),
-                    self._sender(aredis),
+                    self.receiver(),
+                    self.sender(),
                 )
             except asyncio.CancelledError:
                 logger.info(f"bridge start {self.pattern}: cancelled")
             except Exception as e:
                 logger.info(f'bridge start {self.pattern}: exception {e} {type(e)}')
 
-            aredis.close()
-            await aredis.wait_closed()
+            self.aredis.close()
+            await self.aredis.wait_closed()
 
 
 async def main():
@@ -221,9 +294,6 @@ async def main():
             await asyncio.sleep(2)
             print("monitor status:", n, await ps.status())
 
-    ps = BasicMessageBus()
-    await ps.connect()
-
     tunnel_config = {
         "ssh_address_or_host": ("robnee.com", 22),
         "remote_bind_address": ("127.0.0.1", 6379),
@@ -231,19 +301,21 @@ async def main():
         "ssh_username": "rnee",
         "ssh_pkey": os.path.expanduser(r"~/.ssh/id_rsa"),
     }
-    bridge = MessageBridge("cat.", tunnel_config, ps)
+
+    ps = RedisMessageBus("cat.", tunnel_config)
+    # ps = BasicMessageBus()
+    await ps.connect()
 
     aws = (
         talk(ps, ("cat.dog", "cat.pig", "cow.emu")),
         listen(ps, "."),
         listen(ps, "cat."),
         listen(ps, "cat.pig"),
-        bridge.start(),
         monitor(),
+        # RedisMessageBridge("cat.", tunnel_config, ps).start(),
     )
     tasks = [asyncio.create_task(c) for c in aws]
     await wait_gracefully(tasks, timeout=15)
-
     await ps.close()
     
     print("main: done")
@@ -251,7 +323,7 @@ async def main():
 
 if __name__ == "__main__":
     patch()
-    logger.setLevel(logging.WARNING)
+    logger.setLevel(logging.DEBUG)
     handler = logging.StreamHandler()
     try:
         logger.addHandler(handler)
