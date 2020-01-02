@@ -149,16 +149,19 @@ class BasicMessageBus(MessageBus):
 class RedisMessageBus(MessageBus):
     """ A MessageBus implemented as a Redis pubsub channel """
 
-    def __init__(self, pattern, tunnel_config):
+    def __init__(self, pattern):
         super().__init__()
         self.tunnel = None
         self.aredis = None
         self.pattern = pattern
-        self.tunnel_config = tunnel_config
 
-    async def connect(self):
-        self.tunnel = SSHTunnelForwarder(**self.tunnel_config)
-        self.tunnel.start()
+    async def connect(self, tunnel_config):
+        def create_tunnel():
+            # todo= should this be wrapped in a simple class?
+            self.tunnel = SSHTunnelForwarder(**tunnel_config)
+            self.tunnel.start()
+
+        await asyncio.get_event_loop().run_in_executor(None, create_tunnel)
 
         address = self.tunnel.local_bind_address
         self.aredis = await aioredis.create_redis_pool(address, encoding="utf-8")
@@ -194,7 +197,6 @@ class RedisMessageBus(MessageBus):
 
             return {
                 "status": "connected",
-            #    "listeners": [str(p) for p, _ in self.listeners],
                 "patterns": list(self.aredis.patterns.keys()),
                 "timestamp": ts(),
             }
@@ -206,7 +208,9 @@ class RedisMessageBus(MessageBus):
         await self.aredis.wait_closed()
         self.aredis = None
 
-        self.tunnel.stop()
+        # this is slow so run in a thread pool
+        await asyncio.get_event_loop().run_in_executor(None, self.tunnel.stop)
+        self.tunnel = None
         logger.info(f"Redis connection closed")
 
 
@@ -282,8 +286,8 @@ async def main():
     async def listen(bus, pattern):
         await asyncio.sleep(1.5)
         try:
-            async for x in bus.listen(pattern):
-                print(f"listen({pattern}):", x)
+            async for message in bus.listen(pattern):
+                print(f"listen({pattern}):", message)
         except asyncio.CancelledError:
             pass
 
@@ -302,19 +306,17 @@ async def main():
         "ssh_pkey": os.path.expanduser(r"~/.ssh/id_rsa"),
     }
 
-    ps = RedisMessageBus("cat.", tunnel_config)
-    # ps = BasicMessageBus()
-    await ps.connect()
+    ps = RedisMessageBus("cat.")
+    await ps.connect(tunnel_config)
 
-    aws = (
+    tasks = [asyncio.create_task(c) for c in (
         talk(ps, ("cat.dog", "cat.pig", "cow.emu")),
         listen(ps, "."),
         listen(ps, "cat."),
         listen(ps, "cat.pig"),
         monitor(),
-        # RedisMessageBridge("cat.", tunnel_config, ps).start(),
-    )
-    tasks = [asyncio.create_task(c) for c in aws]
+    )]
+
     await wait_gracefully(tasks, timeout=15)
     await ps.close()
     
