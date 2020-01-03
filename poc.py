@@ -6,10 +6,12 @@ Proof of concept for simple pubsub system with Redis bridge.  this will be the m
 
 import os
 import re
+import sys
 import time
 import logging
 import asyncio
 import aioredis
+import asyncssh
 from collections import namedtuple
 from sshtunnel import SSHTunnelForwarder
 
@@ -151,19 +153,35 @@ class RedisMessageBus(MessageBus):
 
     def __init__(self, pattern):
         super().__init__()
-        self.tunnel = None
+        self.conn = None
+        self.listener = None
         self.aredis = None
         self.pattern = pattern
-
+ 
     async def connect(self, tunnel_config):
-        def create_tunnel():
-            # todo= should this be wrapped in a simple class?
-            self.tunnel = SSHTunnelForwarder(**tunnel_config)
-            self.tunnel.start()
+        def convert_config():
+            return {
+                "host": tunnel_config['ssh_address_or_host'][0],
+                "port": tunnel_config['remote_bind_address'][1],
+                "user": tunnel_config['ssh_username'],
+                "keys": open(tunnel_config['ssh_pkey']).read(),
+            }
 
-        await asyncio.get_event_loop().run_in_executor(None, create_tunnel)
+        local_config = convert_config()
+        
+        self.conn = asyncssh.connect(
+            'localhost', 
+            username=local_config['user'], 
+            client_keys=local_config['keys'],
+        )
+        self.listener = await conn.forward_local_port(
+            '',
+            0,
+            local_config['host'],
+            local_config['port'],
+        )
 
-        address = self.tunnel.local_bind_address
+        address = ('localhost', self.listener.get_port())
         self.aredis = await aioredis.create_redis_pool(address, encoding="utf-8")
         logger.info(f"Redis connected: {self.aredis.address}")
 
@@ -209,8 +227,9 @@ class RedisMessageBus(MessageBus):
         self.aredis = None
 
         # this is slow so run in a thread pool
-        await asyncio.get_event_loop().run_in_executor(None, self.tunnel.stop)
-        self.tunnel = None
+        self.listener.close()
+        await self.listener.wait_closed()
+        self.listener = None
         logger.info(f"Redis connection closed")
 
 
