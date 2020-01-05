@@ -21,12 +21,12 @@ import sys
 import asyncio
 import logging
 
-import patch
+import aiotools
 
 
 """
 Protocols are fine but they are actually synchronous.  it might be tricky to incorporate
-the becessary back-end calls later.  Protocols, at least this example, use a somewhat
+the necessary back-end calls later.  Protocols, at least this example, use a somewhat
 awkward callback to signal done.
 todo: write a dummy server task to mock the endpoint for testing
 """

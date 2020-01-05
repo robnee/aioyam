@@ -1,7 +1,8 @@
 #! /usr/bin/env python3
 
 """
-Proof of concept for simple pubsub system with Redis bridge.  this will be the messaging backbone of the next remote control system
+Proof of concept for simple pubsub system with Redis bridge.  this will be the messaging
+backbone of the next remote control system
 """
 
 import os
@@ -14,7 +15,7 @@ from collections import namedtuple
 from sshtunnel import SSHTunnelForwarder
 
 from aiotools import patch, wait_gracefully
-
+from yamaha import Yamaha
 
 Message = namedtuple("Message", "source, key, value")
 
@@ -86,7 +87,7 @@ class BasicMessageBus(MessageBus):
 
     async def connect(self, address=None):
         self.conn = self
-        logger.info(f"bus connected ({address})")
+        logger.info(f"bus: connected ({address})")
 
     async def send(self, message):
         if not self.conn:
@@ -94,7 +95,7 @@ class BasicMessageBus(MessageBus):
 
         if message.key.endswith("."):
             raise ValueError("trailing '.' in key")
-            
+
         self.set_channel(message.key, message.value)
         for pattern, q in self.listeners:
             if pattern.match(message.key):
@@ -104,10 +105,10 @@ class BasicMessageBus(MessageBus):
         if not self.conn:
             raise RuntimeError("bus not connected")
 
-        try:
-            p = DotPattern(pattern)
-            q = asyncio.Queue()
+        p = DotPattern(pattern)
+        q = asyncio.Queue()
 
+        try:
             self.listeners.add((p, q))
 
             # yield current values
@@ -119,10 +120,11 @@ class BasicMessageBus(MessageBus):
             while True:
                 msg = await q.get()
                 if not msg:
+                    logger.info(f"listener {pattern}: null message received.  done.")
                     break
                 yield msg
-        except:
-            raise
+        except asyncio.CancelledError:
+            logger.info(f"listener {pattern}: cancelled")
         finally:
             self.listeners.remove((p, q))
 
@@ -138,10 +140,12 @@ class BasicMessageBus(MessageBus):
             return {"status": "disconnected"}
 
     async def close(self):
-        self.conn = None
+        """ send all listeners a null message and close the bus """
+
         for p, q in self.listeners:
             await q.put(None)
-        logger.info(f"connection closed")
+        self.conn = None
+        logger.info(f"bus: connection closed")
 
 
 # todo: should this be initialized with a mask to restrict the namespace?
@@ -157,7 +161,6 @@ class RedisMessageBus(MessageBus):
 
     async def connect(self, tunnel_config):
         def create_tunnel():
-            # todo= should this be wrapped in a simple class?
             self.tunnel = SSHTunnelForwarder(**tunnel_config)
             self.tunnel.start()
 
@@ -180,7 +183,7 @@ class RedisMessageBus(MessageBus):
         logger.info(f"Redis send: {message}:{message.value}")
         await self.aredis.publish(message.key, message.value)
 
-    async def listen(self, pattern):
+    async def listen(self, pattern='*'):
         if not self.aredis:
             raise RuntimeError("Redis not connected")
 
@@ -272,6 +275,32 @@ class RedisMessageBridge:
             await self.aredis.wait_closed()
 
 
+class YamahaComponent:
+    """ bridge Yamaha YNCA component onto MessageBus """
+
+    def __init__(self, ynca_hostname, bus):
+        self.bus = bus
+        self.yamaha = Yamaha(ynca_hostname)
+
+        # start up the listener
+        self.listen_task = asyncio.create_task(self.listen())
+
+    async def listen(self):
+        """ listen for commands and relay them to the component """
+        try:
+            async for message in self.bus.listen():
+                print(f"yamaha:", message)
+        except asyncio.CancelledError:
+            pass
+
+    async def close(self):
+        """ Shut down the listener """
+        self.listen_task.cancel()
+        self.listen_task = None
+
+        logger.info(f"yamaha: closed")
+
+
 async def main():
     """ main synchronous entry point """
 
@@ -294,9 +323,14 @@ async def main():
     async def monitor():
         """ echo bus status every 2 sec """
 
-        for n in range(6):
-            await asyncio.sleep(2)
-            print("monitor status:", n, await ps.status())
+        count = 0
+        try:
+            while True:
+                await asyncio.sleep(1)
+                count += 1
+                print(f"monitor status: 0:{count:02}", await ps.status())
+        except asyncio.CancelledError:
+            pass
 
     tunnel_config = {
         "ssh_address_or_host": ("robnee.com", 22),
@@ -309,6 +343,8 @@ async def main():
     ps = RedisMessageBus("cat.")
     await ps.connect(tunnel_config)
 
+    yam = YamahaComponent('CL-6EA47', ps)
+
     tasks = [asyncio.create_task(c) for c in (
         talk(ps, ("cat.dog", "cat.pig", "cow.emu")),
         listen(ps, "."),
@@ -317,13 +353,14 @@ async def main():
         monitor(),
     )]
 
-    await wait_gracefully(tasks, timeout=15)
+    await wait_gracefully(tasks, timeout=12)
+    await yam.close()
     await ps.close()
-    
     print("main: done")
 
 
 if __name__ == "__main__":
+    print("all: start")
     patch()
     logger.setLevel(logging.DEBUG)
     handler = logging.StreamHandler()

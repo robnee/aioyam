@@ -44,7 +44,7 @@ async def wait_gracefully(tasks, timeout=None):
     """
 
     while True:
-        done, pending = await asyncio.wait(tasks, timeout=15)
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
 
         for t in done:
             if t.exception():
