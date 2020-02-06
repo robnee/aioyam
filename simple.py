@@ -13,7 +13,7 @@ import aioredis
 from collections import namedtuple
 from sshtunnel import SSHTunnelForwarder
 
-import patch
+from aiotools import patch
 from yamaha import Yamaha
 
 Message = namedtuple("Message", "key, value")
@@ -128,7 +128,7 @@ class BasicMessageBus(MessageBus):
 
 
 class YamahaAdapter:
-    """ interface Yamaha target tommessage bus """
+    """ interface Yamaha target to mmessage bus """
     def __init__(self, bus):
         self.bus = bus
         self.yam = Yamaha()
