@@ -158,6 +158,7 @@ class YNCAServer:
     
                 self.log.append((message, response))
     
+                # there could be more to process but punt on that for now
                 await asyncio.sleep(2)
     
                 logging.info("handle: close request connection")
@@ -202,7 +203,6 @@ async def main():
         # x = await yam.put("@MAIN:VOL", "Up 2 dB")
         # x = await yam.get("@MAIN:VOL")
         x = await yam.put("@MAIN:PWR", "Standby")
-
         print("test: response:", x)
     
     ynca = YNCAServer().start()
@@ -214,12 +214,12 @@ async def main():
     t = 3
     print(f'main: sleep {t}')
     await asyncio.sleep(t)
-    print(f'main: stop server')
+    print(f'main: stopping server')
     await ynca.wait_close()
     print('main: done')
 
 
 if __name__ == '__main__':
     logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
-
+    aiotools.patch()
     asyncio.run(main(), debug=False)
