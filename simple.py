@@ -16,7 +16,7 @@ from sshtunnel import SSHTunnelForwarder
 from aiotools import patch
 from yamaha import Yamaha
 
-Message = namedtuple("Message", "key, value")
+Message = namedtuple("Message", "key, value, ts")
 
 logger = logging.getLogger()
 
@@ -52,12 +52,16 @@ class DotPattern:
 class MessageBus:
     def __init__(self):
         self._channels = {}
+        self.start_time = ts()
 
     def set_channel(self, k, v):
         self._channels[k] = v
 
     def get_channels(self):
         return self._channels.items()
+        
+    def new_message(self, k, v):
+        return Message(k, v, ts())
 
 
 class BasicMessageBus(MessageBus):
@@ -81,7 +85,7 @@ class BasicMessageBus(MessageBus):
         self.set_channel(k, v)
         for pattern, q in self.listeners:
             if pattern.match(k):
-                await q.put(Message(k, v))
+                await q.put(self.new_message(k, v))
 
     async def listen(self, pattern):
         if not self.conn:
@@ -96,7 +100,7 @@ class BasicMessageBus(MessageBus):
             # yield current values
             for k, v in self.get_channels():
                 if p.match(k):
-                    yield Message(k, v)
+                    yield self.new_message(k, v)
 
             # yield the messages as they come through
             while True:
@@ -113,7 +117,7 @@ class BasicMessageBus(MessageBus):
         if self.conn:
             return {
                 "status": "connected",
-                "iisteners": len(self.listeners),
+                "listeners": len(self.listeners),
                 "channels": list(self.get_channels()),
                 "timestamp": ts(),
             }
@@ -150,10 +154,12 @@ async def main():
     ps = BasicMessageBus()
     await ps.connect()
 
-    async def talk(keys):
+    async def talk(keys, t=0.35):
+        print(f"talk {len(keys)} {t}: start")
+        
         for n in range(5):
             for k in keys:
-                await asyncio.sleep(0.35)
+                await asyncio.sleep(t)
                 await ps.send(k, n)
 
         await ps.close()
@@ -162,14 +168,14 @@ async def main():
     async def listen(k):
         await asyncio.sleep(1.5)
         async for x in ps.listen(k):
-            print(f"listen({k}):", x)
+            print(f"listen({k}): {(ts() - x.ts) * 1000000:.0f}us: {x}")
         print(f"listen {k}: done")
 
     async def mon():
-        for _ in range(5):
+        for _ in range(15):
             await asyncio.sleep(1)
             s = await ps.status()
-            print("mon status:", s)
+            print(f"mon status {_}:", s)
 
         print("mon: done")
 
@@ -201,7 +207,7 @@ async def main():
             except asyncio.CancelledError:
                 print("watch cancelled:", pattern)
             except Exception as e:
-                print("exception:", type(e), e)
+                print("bridge exception:", type(e), e)
             finally:
                 print("watch finally")
 
@@ -218,24 +224,25 @@ async def main():
         bridge("cat.*", ps),
         mon(),
     }
-    done, pending = await asyncio.wait(aws, timeout=15)
+    done, pending = await asyncio.wait(aws, timeout=10)
 
     print("run done:", len(done), "pending:", len(pending))
     for t in pending:
-        print("cancelling:")
+        print(f"cancelling {t.get_name()}:")
         t.cancel()
         # result = await t
         # print('cancel:', result)
 
     for t in done:
         if t.exception():
-            print("exception:", t, t.exception())
+            print(f"result {t.get_name()}: exception: {t.exception()}")
         else:
-            print("result:", t.result())
+            print(f"result {t.get_name()}: {t.result()}")
 
     print("main: done")
 
 
 if __name__ == "__main__":
+    patch()
     asyncio.run(main(), debug=True)
     print("all: done")
