@@ -12,11 +12,10 @@ import asyncio
 import aioredis
 from collections import namedtuple
 from sshtunnel import SSHTunnelForwarder
-
 from aiotools import patch, wait_gracefully
 from phue import Bridge
 
-Message = namedtuple("Message", "source, key, value")
+Message = namedtuple("Message", "source, target, key, value")
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +74,8 @@ class RedisMessageBus(MessageBus):
         await self.aredis.publish(message.key, message.value)
 
     async def listen(self, pattern='*'):
+        """ todo: how to map from source, target, k, v to redis """
+
         if not self.aredis:
             raise RuntimeError("Redis not connected")
 
@@ -82,6 +83,7 @@ class RedisMessageBus(MessageBus):
             chan, = await self.aredis.psubscribe(self.redis_pattern())
             while await chan.wait_message():
                 k, v = await chan.get(encoding="utf-8")
+                # todo: add target arg
                 yield Message("redis", k.decode(), v)
         except Exception:
             raise
@@ -109,7 +111,7 @@ class RedisMessageBus(MessageBus):
 
 
 class HueComponent:
-    """ bridge Yamaha YNCA component onto MessageBus """
+    """ bridge Hue bridge onto MessageBus """
 
     def __init__(self, bridge_hostname, bus):
         self.bus = bus
@@ -122,8 +124,8 @@ class HueComponent:
         """ listen for commands and relay them to the component """
         try:
             async for message in self.bus.listen():
-                if message.message.startswith("
-                print(f"Bridge:", message)
+                if message.source.startswith(""):
+                    print(f"Bridge:", message)
         except asyncio.CancelledError:
             pass
 
@@ -136,7 +138,7 @@ class HueComponent:
 
 
 async def main():
-    """ main synchronous entry point """
+    """ main entry point """
 
     async def talk(bus, keys):
         """ generate some test messages """
@@ -147,6 +149,8 @@ async def main():
                 await bus.send(Message("local", k, v))
 
     async def listen(bus, pattern):
+        """ listen on the bus """
+
         await asyncio.sleep(1.5)
         try:
             async for message in bus.listen(pattern):
@@ -177,7 +181,7 @@ async def main():
     ps = RedisMessageBus("cat.")
     await ps.connect(tunnel_config)
 
-    yam = HueComponent('Philips-hue.home', ps)
+    hue = HueComponent('Philips-hue.home', ps)
 
     tasks = [asyncio.create_task(c) for c in (
         talk(ps, ("cat.dog", "cat.pig", "cow.emu")),
@@ -188,7 +192,7 @@ async def main():
     )]
 
     await wait_gracefully(tasks, timeout=12)
-    await yam.close()
+    await hue.close()
     await ps.close()
     print("main: done")
 
