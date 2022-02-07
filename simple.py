@@ -138,6 +138,8 @@ async def main():
     ps = BasicMessageBus()
     await ps.connect()
 
+    listen_messages = []
+
     async def talk(keys, sleep_time=0.35):
         print(f"talk {len(keys)} {sleep_time}: start")
 
@@ -153,9 +155,11 @@ async def main():
         print("talk: done")
 
     async def listen(k):
+        nonlocal listen_messages
+
         await asyncio.sleep(1.5)
         async for x in ps.listen(k):
-            print(f"listen({k}): {(ts() - x.ts) * 1000000:.0f}us: {x}")
+            listen_messages.append((f"listen({k})", (ts() - x.ts) * 1000000, x))
         print(f"listen {k}: done")
 
     async def mon():
@@ -168,8 +172,6 @@ async def main():
             print("mon cancelled:")
 
         print("mon: done")
-
-        return True
 
     async def bridge_orig(pattern, bus):
         tunnel_config = {
@@ -231,6 +233,7 @@ async def main():
             "ssh_pkey": os.path.expanduser(r"~/.ssh/id_rsa"),
         }
 
+        print(tunnel_config)
         with SSHTunnelForwarder(**tunnel_config) as tunnel:
             address = tunnel.local_bind_address
             url = "redis://{0}:{1}".format(*address)
@@ -239,14 +242,19 @@ async def main():
             redis = aioredis.from_url(url)
             print("redis connected")
 
+            config = await redis.config_get('*')
+            print(config)
+
             try:
                 pubsub = redis.pubsub()
 
                 # Subscribing won't fully clean up so expect asyncio errors on shutdown
-                response = await pubsub.psubscribe(pattern)
-                print("subscribe:", response)
+                await pubsub.psubscribe(pattern)
 
-                await reader(pubsub)
+                print("watch: watching")
+                # await reader(pubsub)
+                async for x in pubsub.listen():
+                    print(x)
 
                 print("watch: reader exited")
             except asyncio.CancelledError:
@@ -260,32 +268,35 @@ async def main():
             response = await pubsub.punsubscribe()
             print("unsubscribe:", response)
 
-            del pubsub
+            await redis.close()
 
         print("watch done:", pattern)
 
     coros = (
-        talk(("cat.dog", "cat.pig", "cow.emu")),
-        listen("."),
-        listen("cat."),
-        listen("cat.pig"),
-        bridge("cat.*", ps),
-        mon(),
+        asyncio.create_task(talk(("cat.dog", "cat.pig", "cow.emu")), name="talk"),
+        asyncio.create_task(listen("."), name="listen"),
+        asyncio.create_task(listen("cat."), name="listen"),
+        asyncio.create_task(listen("cat.pig"), name="listen"),
+        asyncio.create_task(bridge("cat.*", ps), name="bridge"),
+        asyncio.create_task(mon(), name="mon"),
     )
-    done, pending = await asyncio.wait(tuple(asyncio.create_task(c) for c in coros), timeout=10)
+    done, pending = await asyncio.wait(coros, timeout=10)
 
     print("run done:", len(done), "pending:", len(pending))
     for t in pending:
         print(f"cancelling {t.get_name()}:")
         t.cancel()
-        # result = await t
-        # print('cancel:', result)
+        result = await t
+        print(f"cancel {t.get_name()} result:", result)
 
-    for t in done:
+    for t in done.union(pending):
         if t.exception():
             print(f"result {t.get_name()}: exception: {t.exception()}")
         else:
             print(f"result {t.get_name()}: {t.result()}")
+
+    for t in asyncio.all_tasks():
+        print(t.get_name(), t)
 
     print("main: done")
 

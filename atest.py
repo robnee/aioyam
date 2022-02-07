@@ -12,16 +12,16 @@ STOPWORD = "STOP"
 async def reader(channel: aioredis.client.PubSub):
     while True:
         try:
-            async with async_timeout.timeout(1):
-                message = await channel.get_message(ignore_subscribe_messages=True)
-                if message is not None:
-                    print(f"(Reader) Message Received: {message}")
-                    if message["data"].decode() == STOPWORD:
-                        print("(Reader) STOP")
-                        break
-                await asyncio.sleep(0.01)
-        except asyncio.TimeoutError:
-            pass
+            print("reader: start")
+            async for message in channel.listen():
+                print(message)
+                if message['data'].decode() == STOPWORD:
+                    print('break')
+                    return
+        except asyncio.CancelledError:
+            print("reader cancelled:")
+        except Exception as e:
+            print("reader exception:", type(e), e)
 
 
 async def main():
@@ -33,6 +33,7 @@ async def main():
         "ssh_pkey": os.path.expanduser(r"~/.ssh/id_rsa"),
     }
 
+    print(tunnel_config)
     with SSHTunnelForwarder(**tunnel_config) as tunnel:
         try:
             address = tunnel.local_bind_address
@@ -48,10 +49,15 @@ async def main():
             future = asyncio.create_task(reader(pubsub))
 
             await redis.publish("channel:1", "Hello")
+            await asyncio.sleep(2)
             await redis.publish("channel:2", "World")
+            await asyncio.sleep(2)
             await redis.publish("channel:1", STOPWORD)
 
-            await future
+            x = await future
+            print(x, future)
+
+            await redis.close()
         except Exception as e:
             print("ex: ", e)
 
@@ -59,4 +65,7 @@ async def main():
 if __name__ == "__main__":
     # asyncio.get_event_loop().run_until_complete(main())
     # asyncio.run will report an unhandled exception in 3.9 because pubsub will not fully clean up
-    asyncio.run(main(), debug=True)
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        print(e)
